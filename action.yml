@@ -3,9 +3,21 @@ description: 'Installs NVIDIA CUDA Toolkit and adds it to PATH'
 author: 'Jim Verheijde'
 inputs:
   cuda:
-    description: 'Cuda version'
+    description: 'CUDA version'
     required: false
-    default: '11.7.0'
+    default: '11.8.0'
+  cudnn:
+    description: 'cuDNN version'
+    required: false
+    default: ''
+  cudnn_url:
+    description: 'cuDNN Archive URL'
+    required: false
+    default: ''
+  cudnn_archive_dir:
+    description: 'name of the unarchived cuDNN directory'
+    required: false
+    default: ''
   sub-packages:
     description: 'Only installs specified subpackages, must be in the form of a JSON array. For example, if you only want to install nvcc and visual studio integration: ["nvcc", "visual_studio_integration"] double quotes required! Note that if you want to use this on Linux, ''network'' method MUST be used.'
     required: false
@@ -23,7 +35,7 @@ inputs:
     required: false
     default: 'true'
 runs:
-  using: 'node12'
+  using: 'node16'
   main: dist/index.js
 branding:
   icon: box

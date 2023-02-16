@@ -1,12 +1,14 @@
 import * as artifact from '@actions/artifact'
 import * as core from '@actions/core'
-import {OSType, getOs} from './platform'
-import {SemVer} from 'semver'
+import {OSType, getOs, CUDAToolkit, DownloadType} from './platform'
 import {exec} from '@actions/exec'
+import {getFileExtension} from './downloader'
+import * as path from 'path'
+import * as io from '@actions/io'
 
 export async function install(
   executablePath: string,
-  version: SemVer,
+  toolkit: CUDAToolkit,
   subPackagesArray: string[],
   linuxLocalArgsArray: string[]
 ): Promise<void> {
@@ -32,6 +34,7 @@ export async function install(
     }
   }
 
+  const version = toolkit.cuda_version
   // Configure OS dependent run command and args
   switch (await getOs()) {
     case OSType.linux:
@@ -58,7 +61,7 @@ export async function install(
       break
   }
 
-  // Run installer
+  // Run CUDA installer
   try {
     core.debug(`Running install executable: ${executablePath}`)
     const exitCode = await exec(command, installArgs, execOptions)
@@ -84,5 +87,142 @@ export async function install(
       )
       core.debug(`Upload result: ${uploadResult}`)
     }
+    await io.rmRF(executablePath)
+  }
+}
+
+export async function installCudnn(
+  cudnnArchivePath: string,
+  directoryName: string,
+  cudaPath: string
+): Promise<void> {
+  let installArgs: string[]
+  let command: string
+  let fileExt: string
+  const execOptions = {
+    listeners: {
+      stdout: (data: Buffer) => {
+        core.debug(data.toString())
+      },
+      stderr: (data: Buffer) => {
+        core.debug(`Error: ${data.toString()}`)
+      }
+    }
+  }
+
+  switch (await getOs()) {
+    case OSType.linux:
+      command = `sudo tar`
+      installArgs = ['-xf', cudnnArchivePath, '-C', cudaPath]
+      fileExt = getFileExtension(OSType.linux, DownloadType.cudnn)
+      break
+    case OSType.windows:
+      command = 'powershell'
+      installArgs = [
+        '-command',
+        'Expand-Archive',
+        '-LiteralPath',
+        `"${cudnnArchivePath}"`,
+        '-DestinationPath',
+        `"${cudaPath}"`,
+        '-force'
+      ]
+      fileExt = getFileExtension(OSType.windows, DownloadType.cudnn)
+      break
+  }
+
+  // unarchive cudnn to CUDA directory
+  try {
+    core.debug(`Unarchiving cudnn files: ${cudnnArchivePath}`)
+    const exitCode = await exec(command, installArgs, execOptions)
+    core.debug(`exit code: ${exitCode}`)
+  } catch (error) {
+    core.debug(`Error during installation: ${error}`)
+    throw error
+  }
+
+  await io.rmRF(cudnnArchivePath)
+
+  let filename: string = directoryName
+  filename = filename.substring(0, filename.lastIndexOf(fileExt) - 1)
+  // move everything unarchived
+  switch (await getOs()) {
+    case OSType.linux:
+      command = `sudo bash`
+      installArgs = [
+        '-c',
+        `mv "${cudaPath}/${filename}/lib/*" "${cudaPath}/lib/" && mv "${cudaPath}/${filename}/include/*" "${cudaPath}/include/"`
+      ]
+      break
+    case OSType.windows:
+      command = 'powershell'
+      installArgs = [
+        '-command',
+        'Get-ChildItem',
+        '-Path',
+        `"${cudaPath}\\${filename}\\bin\\\\*.dll"`,
+        '-Recurse',
+        '|',
+        'Move-Item',
+        '-Destination',
+        `"${cudaPath}\\bin"`,
+        '-force'
+      ]
+      break
+  }
+  try {
+    core.debug(`moving cudnn files: ${cudnnArchivePath}`)
+    const exitCode = await exec(command, installArgs, execOptions)
+    core.debug(`exit code: ${exitCode}`)
+  } catch (error) {
+    core.debug(`Error during installation: ${error}`)
+    throw error
+  }
+
+  switch (await getOs()) {
+    case OSType.windows:
+      command = 'powershell'
+      installArgs = [
+        '-command',
+        'Get-ChildItem',
+        '-Path',
+        `"${cudaPath}\\${filename}\\include\\\\*.h"`,
+        '-Recurse',
+        '|',
+        'Move-Item',
+        '-Destination',
+        `"${cudaPath}\\include"`,
+        '-force'
+      ]
+      try {
+        core.debug(`moving cudnn files: ${cudnnArchivePath}`)
+        const exitCode = await exec(command, installArgs, execOptions)
+        core.debug(`exit code: ${exitCode}`)
+      } catch (error) {
+        core.debug(`Error during installation: ${error}`)
+        throw error
+      }
+
+      installArgs = [
+        '-command',
+        'Get-ChildItem',
+        '-Path',
+        `"${cudaPath}\\${filename}\\lib\\x64\\\\*.lib"`,
+        '-Recurse',
+        '|',
+        'Move-Item',
+        '-Destination',
+        `"${cudaPath}\\lib\\x64"`,
+        '-force'
+      ]
+      try {
+        core.debug(`moving cudnn files: ${cudnnArchivePath}`)
+        const exitCode = await exec(command, installArgs, execOptions)
+        core.debug(`exit code: ${exitCode}`)
+      } catch (error) {
+        core.debug(`Error during installation: ${error}`)
+        throw error
+      }
+      break
   }
 }

@@ -146,7 +146,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.download = void 0;
+exports.getFileExtension = exports.download = void 0;
 const cache = __importStar(__nccwpck_require__(7799));
 const core = __importStar(__nccwpck_require__(2186));
 const glob = __importStar(__nccwpck_require__(8090));
@@ -157,67 +157,77 @@ const windows_links_1 = __nccwpck_require__(5986);
 const fs_1 = __importDefault(__nccwpck_require__(7147));
 const get_links_1 = __nccwpck_require__(1451);
 // Download helper which returns the installer executable and caches it for next runs
-function download(version, method, useGitHubCache) {
+function download(toolkit, method, useGitHubCache) {
     return __awaiter(this, void 0, void 0, function* () {
         // First try to find tool with desired version in tool cache (local to machine)
         const toolName = 'cuda_installer';
+        const cudnnToolName = 'cudnn_archive';
         const osType = yield (0, platform_1.getOs)();
         const osRelease = yield (0, platform_1.getRelease)();
         const toolId = `${toolName}-${osType}-${osRelease}`;
-        const toolPath = tc.find(toolId, `${version}`);
+        const cudnnToolId = `${cudnnToolName}-${osType}-${osRelease}`;
         // Path that contains the executable file
         let executablePath;
+        let cudnnArchivePath;
+        const toolPath = tc.find(toolId, `${toolkit.cuda_version}`);
         if (toolPath) {
             // Tool is already in cache
-            core.debug(`Found in local machine cache ${toolPath}`);
+            core.debug(`Found CUDA in local machine cache ${toolPath}`);
             executablePath = toolPath;
         }
         else {
             // Second option, get tool from GitHub cache if enabled
-            const cacheKey = `${toolId}-${version}`;
-            const cachePath = cacheKey;
-            let cacheResult;
-            if (useGitHubCache) {
-                cacheResult = yield cache.restoreCache([cachePath], cacheKey);
-            }
-            if (cacheResult !== undefined) {
-                core.debug(`Found in GitHub cache ${cachePath}`);
-                executablePath = cachePath;
+            const cacheKey = `${toolId}-${toolkit.cuda_version}`;
+            executablePath = yield fromCacheOrDownload(toolName, toolkit, method, cacheKey, useGitHubCache, osType, toolId, platform_1.DownloadType.cuda);
+        }
+        if (toolkit.cudnn_version !== undefined) {
+            const cudnnPath = tc.find(cudnnToolId, `${toolkit.cudnn_version}`);
+            if (cudnnPath) {
+                // Tool is already in cache
+                core.debug(`Found cudnn in local machine cache ${cudnnPath}`);
+                cudnnArchivePath = cudnnPath;
             }
             else {
-                // Final option, download tool from NVIDIA servers
-                core.debug(`Not found in local/GitHub cache, downloading...`);
-                // Get download URL
-                const url = yield getDownloadURL(method, version);
-                // Get intsaller filename extension depending on OS
-                const fileExtension = getFileExtension(osType);
-                const destFileName = `${toolId}_${version}.${fileExtension}`;
-                // Download executable
-                const downloadPath = yield tc.downloadTool(url.toString(), destFileName);
-                // Copy file to GitHub cachePath
-                core.debug(`Copying ${destFileName} to ${cachePath}`);
-                yield io.mkdirP(cachePath);
-                yield io.cp(destFileName, cachePath);
-                // Cache download to local machine cache
-                const localCachePath = yield tc.cacheFile(downloadPath, destFileName, `${toolName}-${osType}`, `${version}`);
-                core.debug(`Cached download to local machine cache at ${localCachePath}`);
-                // Cache download to GitHub cache if enabled
-                if (useGitHubCache) {
-                    const cacheId = yield cache.saveCache([cachePath], cacheKey);
-                    if (cacheId !== -1) {
-                        core.debug(`Cached download to GitHub cache with cache id ${cacheId}`);
-                    }
-                    else {
-                        core.debug(`Did not cache, cache possibly already exists`);
-                    }
-                }
-                executablePath = localCachePath;
+                const cudnnCacheKey = `${cudnnToolId}-${toolkit.cudnn_version}`;
+                cudnnArchivePath = yield fromCacheOrDownload(cudnnToolName, toolkit, method, cudnnCacheKey, useGitHubCache, osType, cudnnToolId, platform_1.DownloadType.cudnn);
             }
         }
         // String with full executable path
+        const fullExecutablePath = yield verifyCachePath(executablePath, '0755');
+        let fullArchivedPath;
+        if (cudnnArchivePath !== undefined) {
+            fullArchivedPath = yield verifyCachePath(cudnnArchivePath, undefined);
+        }
+        return [fullExecutablePath, fullArchivedPath];
+    });
+}
+exports.download = download;
+function getFileExtension(osType, downloadType) {
+    switch (downloadType) {
+        case platform_1.DownloadType.cuda:
+            switch (osType) {
+                case platform_1.OSType.windows:
+                    return 'exe';
+                case platform_1.OSType.linux:
+                    return 'run';
+            }
+            break;
+        case platform_1.DownloadType.cudnn:
+            switch (osType) {
+                case platform_1.OSType.windows:
+                    return 'zip';
+                case platform_1.OSType.linux:
+                    return 'tar.xz';
+            }
+    }
+}
+exports.getFileExtension = getFileExtension;
+function verifyCachePath(verifyPath, chmod) {
+    return __awaiter(this, void 0, void 0, function* () {
+        // String with full executable path
         let fullExecutablePath;
         // Get list of files in tool cache
-        const filesInCache = yield (yield glob.create(`${executablePath}/**.*`)).glob();
+        const filesInCache = yield (yield glob.create(`${verifyPath}/**.*`)).glob();
         core.debug(`Files in tool cache:`);
         for (const f of filesInCache) {
             core.debug(f);
@@ -232,35 +242,78 @@ function download(version, method, useGitHubCache) {
             fullExecutablePath = filesInCache[0];
         }
         // Make file executable on linux
-        if ((yield (0, platform_1.getOs)()) === platform_1.OSType.linux) {
+        if ((yield (0, platform_1.getOs)()) === platform_1.OSType.linux && chmod !== undefined) {
             // 0755 octal notation permission is: owner(r,w,x), group(r,w,x), other(r,x) where r=read, w=write, x=execute
-            yield fs_1.default.promises.chmod(fullExecutablePath, '0755');
+            yield fs_1.default.promises.chmod(fullExecutablePath, chmod);
         }
-        // Return full executable path
         return fullExecutablePath;
     });
 }
-exports.download = download;
-function getFileExtension(osType) {
-    switch (osType) {
-        case platform_1.OSType.windows:
-            return 'exe';
-        case platform_1.OSType.linux:
-            return 'run';
-    }
+function fromCacheOrDownload(toolName, toolkit, method, cacheKey, useGitHubCache, osType, toolId, downloadType) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const cachePath = cacheKey;
+        let cacheResult;
+        if (useGitHubCache) {
+            core.debug(`try to restore tool=${toolName}, ${downloadType}[key=${cacheKey}] from GitHub`);
+            cacheResult = yield cache.restoreCache([cachePath], cacheKey);
+        }
+        if (cacheResult !== undefined) {
+            core.debug(`Found in GitHub cache ${cachePath}`);
+            return cachePath;
+        }
+        else {
+            // Final option, download tool from NVIDIA servers
+            core.debug(`Not found in local/GitHub cache, downloading...`);
+            // Get download URL
+            toolkit = yield getDownloadURL(method, toolkit);
+            // Get CUDA/cudnn installer filename extension depending on OS
+            const fileExtension = getFileExtension(osType, downloadType);
+            const version_string = downloadType === platform_1.DownloadType.cuda
+                ? toolkit.cuda_version
+                : toolkit.cudnn_version;
+            const downloadURL = downloadType === platform_1.DownloadType.cuda ? toolkit.cuda_url : toolkit.cudnn_url;
+            if (downloadURL === undefined) {
+                throw new Error(`Empty URL`);
+            }
+            const destFileName = `${toolId}_${version_string}.${fileExtension}`;
+            // Download executable
+            const downloadPath = yield tc.downloadTool(downloadURL.toString(), destFileName);
+            core.debug(`Package URL for ${downloadType}=${downloadURL}, destFileName=${destFileName}, downloadPath=${downloadPath}`);
+            // Copy file to GitHub cachePath
+            core.debug(`Copying ${destFileName} to ${cachePath}`);
+            yield io.mkdirP(cachePath);
+            yield io.cp(destFileName, cachePath);
+            // Cache download to local machine cache
+            const localCachePath = yield tc.cacheFile(downloadPath, destFileName, `${toolName}-${osType}`, `${version_string}`);
+            core.debug(`Cached download to local machine cache at ${localCachePath}`);
+            // Cache download to GitHub cache if enabled
+            if (useGitHubCache) {
+                const cacheId = yield cache.saveCache([cachePath], cacheKey);
+                if (cacheId !== -1) {
+                    core.debug(`Cached CUDA/cudnn installer download to GitHub cache with cache id ${cacheId}`);
+                }
+                else {
+                    core.debug(`Did not cache, cache possibly already exists`);
+                }
+            }
+            return localCachePath;
+        }
+    });
 }
-function getDownloadURL(method, version) {
+function getDownloadURL(method, toolkit) {
     return __awaiter(this, void 0, void 0, function* () {
         const links = yield (0, get_links_1.getLinks)();
         switch (method) {
             case 'local':
-                return links.getLocalURLFromCudaVersion(version);
+                toolkit.cuda_url = links.getLocalURLFromCudaVersion(toolkit.cuda_version);
+                return toolkit;
             case 'network':
                 if (!(links instanceof windows_links_1.WindowsLinks)) {
                     core.debug(`Tried to get windows links but got linux links instance`);
                     throw new Error(`Network mode is not supported by linux, shouldn't even get here`);
                 }
-                return links.getNetworkURLFromCudaVersion(version);
+                toolkit.cuda_url = links.getNetworkURLFromCudaVersion(toolkit.cuda_version);
+                return toolkit;
             default:
                 throw new Error(`Invalid method: expected either 'local' or 'network', got '${method}'`);
         }
@@ -308,12 +361,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.install = void 0;
+exports.installCudnn = exports.install = void 0;
 const artifact = __importStar(__nccwpck_require__(2605));
 const core = __importStar(__nccwpck_require__(2186));
 const platform_1 = __nccwpck_require__(9238);
 const exec_1 = __nccwpck_require__(1514);
-function install(executablePath, version, subPackagesArray, linuxLocalArgsArray) {
+const downloader_1 = __nccwpck_require__(5587);
+const io = __importStar(__nccwpck_require__(7436));
+function install(executablePath, toolkit, subPackagesArray, linuxLocalArgsArray) {
     return __awaiter(this, void 0, void 0, function* () {
         // Install arguments, see: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/index.html#runfile-advanced
         // and https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html
@@ -333,6 +388,7 @@ function install(executablePath, version, subPackagesArray, linuxLocalArgsArray)
                 }
             }
         };
+        const version = toolkit.cuda_version;
         // Configure OS dependent run command and args
         switch (yield (0, platform_1.getOs)()) {
             case platform_1.OSType.linux:
@@ -356,7 +412,7 @@ function install(executablePath, version, subPackagesArray, linuxLocalArgsArray)
                 }));
                 break;
         }
-        // Run installer
+        // Run CUDA installer
         try {
             core.debug(`Running install executable: ${executablePath}`);
             const exitCode = yield (0, exec_1.exec)(command, installArgs, execOptions);
@@ -379,10 +435,143 @@ function install(executablePath, version, subPackagesArray, linuxLocalArgsArray)
                 const uploadResult = yield artifactClient.uploadArtifact(artifactName, files, rootDirectory, artifactOptions);
                 core.debug(`Upload result: ${uploadResult}`);
             }
+            yield io.rmRF(executablePath);
         }
     });
 }
 exports.install = install;
+function installCudnn(cudnnArchivePath, directoryName, cudaPath) {
+    return __awaiter(this, void 0, void 0, function* () {
+        let installArgs;
+        let command;
+        let fileExt;
+        const execOptions = {
+            listeners: {
+                stdout: (data) => {
+                    core.debug(data.toString());
+                },
+                stderr: (data) => {
+                    core.debug(`Error: ${data.toString()}`);
+                }
+            }
+        };
+        switch (yield (0, platform_1.getOs)()) {
+            case platform_1.OSType.linux:
+                command = `sudo tar`;
+                installArgs = ['-xf', cudnnArchivePath, '-C', cudaPath];
+                fileExt = (0, downloader_1.getFileExtension)(platform_1.OSType.linux, platform_1.DownloadType.cudnn);
+                break;
+            case platform_1.OSType.windows:
+                command = 'powershell';
+                installArgs = [
+                    '-command',
+                    'Expand-Archive',
+                    '-LiteralPath',
+                    `"${cudnnArchivePath}"`,
+                    '-DestinationPath',
+                    `"${cudaPath}"`,
+                    '-force'
+                ];
+                fileExt = (0, downloader_1.getFileExtension)(platform_1.OSType.windows, platform_1.DownloadType.cudnn);
+                break;
+        }
+        // unarchive cudnn to CUDA directory
+        try {
+            core.debug(`Unarchiving cudnn files: ${cudnnArchivePath}`);
+            const exitCode = yield (0, exec_1.exec)(command, installArgs, execOptions);
+            core.debug(`exit code: ${exitCode}`);
+        }
+        catch (error) {
+            core.debug(`Error during installation: ${error}`);
+            throw error;
+        }
+        yield io.rmRF(cudnnArchivePath);
+        let filename = directoryName;
+        filename = filename.substring(0, filename.lastIndexOf(fileExt) - 1);
+        // move everything unarchived
+        switch (yield (0, platform_1.getOs)()) {
+            case platform_1.OSType.linux:
+                command = `sudo bash`;
+                installArgs = [
+                    '-c',
+                    `mv "${cudaPath}/${filename}/lib/*" "${cudaPath}/lib/" && mv "${cudaPath}/${filename}/include/*" "${cudaPath}/include/"`
+                ];
+                break;
+            case platform_1.OSType.windows:
+                command = 'powershell';
+                installArgs = [
+                    '-command',
+                    'Get-ChildItem',
+                    '-Path',
+                    `"${cudaPath}\\${filename}\\bin\\\\*.dll"`,
+                    '-Recurse',
+                    '|',
+                    'Move-Item',
+                    '-Destination',
+                    `"${cudaPath}\\bin"`,
+                    '-force'
+                ];
+                break;
+        }
+        try {
+            core.debug(`moving cudnn files: ${cudnnArchivePath}`);
+            const exitCode = yield (0, exec_1.exec)(command, installArgs, execOptions);
+            core.debug(`exit code: ${exitCode}`);
+        }
+        catch (error) {
+            core.debug(`Error during installation: ${error}`);
+            throw error;
+        }
+        switch (yield (0, platform_1.getOs)()) {
+            case platform_1.OSType.windows:
+                command = 'powershell';
+                installArgs = [
+                    '-command',
+                    'Get-ChildItem',
+                    '-Path',
+                    `"${cudaPath}\\${filename}\\include\\\\*.h"`,
+                    '-Recurse',
+                    '|',
+                    'Move-Item',
+                    '-Destination',
+                    `"${cudaPath}\\include"`,
+                    '-force'
+                ];
+                try {
+                    core.debug(`moving cudnn files: ${cudnnArchivePath}`);
+                    const exitCode = yield (0, exec_1.exec)(command, installArgs, execOptions);
+                    core.debug(`exit code: ${exitCode}`);
+                }
+                catch (error) {
+                    core.debug(`Error during installation: ${error}`);
+                    throw error;
+                }
+                installArgs = [
+                    '-command',
+                    'Get-ChildItem',
+                    '-Path',
+                    `"${cudaPath}\\${filename}\\lib\\x64\\\\*.lib"`,
+                    '-Recurse',
+                    '|',
+                    'Move-Item',
+                    '-Destination',
+                    `"${cudaPath}\\lib\\x64"`,
+                    '-force'
+                ];
+                try {
+                    core.debug(`moving cudnn files: ${cudnnArchivePath}`);
+                    const exitCode = yield (0, exec_1.exec)(command, installArgs, execOptions);
+                    core.debug(`exit code: ${exitCode}`);
+                }
+                catch (error) {
+                    core.debug(`Error during installation: ${error}`);
+                    throw error;
+                }
+                break;
+        }
+    });
+}
+exports.installCudnn = installCudnn;
 
 
 /***/ }),
@@ -469,6 +658,14 @@ class LinuxLinks extends links_1.AbstractLinks {
         super();
         // Map of cuda SemVer version to download URL
         this.cudaVersionToURL = new Map([
+            [
+                '12.0.0',
+                'https://developer.download.nvidia.com/compute/cuda/12.0.0/local_installers/cuda_12.0.0_525.60.13_linux.run'
+            ],
+            [
+                '11.8.0',
+                'https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_520.61.05_linux.run'
+            ],
             [
                 '11.7.0',
                 'https://developer.download.nvidia.com/compute/cuda/11.7.0/local_installers/cuda_11.7.0_515.43.04_linux.run'
@@ -604,6 +801,14 @@ class WindowsLinks extends links_1.AbstractLinks {
         super();
         this.cudaVersionToNetworkUrl = new Map([
             [
+                '12.0.0',
+                'https://developer.download.nvidia.com/compute/cuda/12.0.0/network_installers/cuda_12.0.0_windows_network.exe'
+            ],
+            [
+                '11.8.0',
+                'https://developer.download.nvidia.com/compute/cuda/11.8.0/network_installers/cuda_11.8.0_windows_network.exe'
+            ],
+            [
                 '11.7.0',
                 'https://developer.download.nvidia.com/compute/cuda/11.7.0/network_installers/cuda_11.7.0_windows_network.exe'
             ],
@@ -698,6 +903,14 @@ class WindowsLinks extends links_1.AbstractLinks {
         ]);
         // Map of cuda SemVer version to download URL
         this.cudaVersionToURL = new Map([
+            [
+                '12.0.0',
+                'https://developer.download.nvidia.com/compute/cuda/12.0.0/local_installers/cuda_12.0.0_527.41_windows.exe'
+            ],
+            [
+                '11.8.0',
+                'https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_522.06_windows.exe'
+            ],
             [
                 '11.7.0',
                 'https://developer.download.nvidia.com/compute/cuda/11.7.0/local_installers/cuda_11.7.0_516.01_windows.exe'
@@ -848,6 +1061,9 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(2186));
 const method_1 = __nccwpck_require__(3607);
@@ -857,11 +1073,19 @@ const downloader_1 = __nccwpck_require__(5587);
 const version_1 = __nccwpck_require__(8217);
 const installer_1 = __nccwpck_require__(1480);
 const update_path_1 = __nccwpck_require__(4985);
+const path_1 = __importDefault(__nccwpck_require__(1017));
 function run() {
+    var _a, _b;
     return __awaiter(this, void 0, void 0, function* () {
         try {
             const cuda = core.getInput('cuda');
             core.debug(`Desired cuda version: ${cuda}`);
+            const cudnn = core.getInput('cudnn');
+            core.debug(`Desired cudnn version: ${cudnn}`);
+            const cudnn_url = core.getInput('cudnn_url');
+            core.debug(`Desired cuDNN: ${cudnn_url}`);
+            const cudnn_archive_dir = core.getInput('cudnn_archive_dir');
+            core.debug(`Desired cuDNN archive dir: ${cudnn_archive_dir}`);
             const subPackages = core.getInput('sub-packages');
             core.debug(`Desired subPackes: ${subPackages}`);
             const methodString = core.getInput('method');
@@ -885,7 +1109,7 @@ function run() {
             const methodParsed = (0, method_1.parseMethod)(methodString);
             core.debug(`Parsed method: ${methodParsed}`);
             // Parse version string
-            const version = yield (0, version_1.getVersion)(cuda, methodParsed);
+            const cuda_toolkit = yield (0, version_1.getVersion)(cuda, cudnn, cudnn_url, methodParsed);
             // Parse linuxLocalArgs array
             let linuxLocalArgsArray = [];
             try {
@@ -905,24 +1129,37 @@ function run() {
             }
             // Linux network install (uses apt repository)
             const useAptInstall = yield (0, apt_installer_1.useApt)(methodParsed);
+            let cudnnArchivePath;
             if (useAptInstall) {
                 // Setup aptitude repos
-                yield (0, apt_installer_1.aptSetup)(version);
+                yield (0, apt_installer_1.aptSetup)(cuda_toolkit.cuda_version);
                 // Install packages
-                const installResult = yield (0, apt_installer_1.aptInstall)(version, subPackagesArray);
+                const installResult = yield (0, apt_installer_1.aptInstall)(cuda_toolkit.cuda_version, subPackagesArray);
                 core.debug(`Install result: ${installResult}`);
             }
             else {
                 // Download
-                const executablePath = yield (0, downloader_1.download)(version, methodParsed, useGitHubCache);
-                // Install
-                yield (0, installer_1.install)(executablePath, version, subPackagesArray, linuxLocalArgsArray);
+                const [executablePath, archivePath] = yield (0, downloader_1.download)(cuda_toolkit, methodParsed, useGitHubCache);
+                // Install CUDA
+                yield (0, installer_1.install)(executablePath, cuda_toolkit, subPackagesArray, linuxLocalArgsArray);
+                cudnnArchivePath = archivePath;
             }
             // Add CUDA environment variables to GitHub environment variables
-            const cudaPath = yield (0, update_path_1.updatePath)(version);
+            const cudaPath = yield (0, update_path_1.updatePath)(cuda_toolkit.cuda_version);
             // Set output variables
             core.setOutput('cuda', cuda);
             core.setOutput('CUDA_PATH', cudaPath);
+            if (cudnnArchivePath !== undefined &&
+                ((_a = cuda_toolkit.cudnn_url) === null || _a === void 0 ? void 0 : _a.pathname) !== undefined) {
+                let directoryName;
+                if (cudnn_archive_dir.length > 0) {
+                    directoryName = cudnn_archive_dir;
+                }
+                else {
+                    directoryName = path_1.default.basename((_b = cuda_toolkit.cudnn_url) === null || _b === void 0 ? void 0 : _b.pathname);
+                }
+                yield (0, installer_1.installCudnn)(cudnnArchivePath, directoryName, cudaPath);
+            }
         }
         catch (error) {
             if (error instanceof Error) {
@@ -979,7 +1216,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.getRelease = exports.getOs = exports.OSType = void 0;
+exports.getRelease = exports.getOs = exports.DownloadType = exports.OSType = void 0;
 const core_1 = __nccwpck_require__(2186);
 const os_1 = __importDefault(__nccwpck_require__(2037));
 var OSType;
@@ -987,6 +1224,11 @@ var OSType;
     OSType["windows"] = "windows";
     OSType["linux"] = "linux";
 })(OSType = exports.OSType || (exports.OSType = {}));
+var DownloadType;
+(function (DownloadType) {
+    DownloadType["cuda"] = "cuda";
+    DownloadType["cudnn"] = "cudnn";
+})(DownloadType = exports.DownloadType || (exports.DownloadType = {}));
 function getOs() {
     return __awaiter(this, void 0, void 0, function* () {
         const osPlatform = os_1.default.platform();
@@ -1209,11 +1451,13 @@ const platform_1 = __nccwpck_require__(9238);
 const semver_1 = __nccwpck_require__(1383);
 const get_links_1 = __nccwpck_require__(1451);
 // Helper for converting string to SemVer and verifying it exists in the links
-function getVersion(versionString, method) {
+function getVersion(cudaVersionString, cudnnVersionString, cudnnDownloadURL, method) {
     return __awaiter(this, void 0, void 0, function* () {
-        const version = new semver_1.SemVer(versionString);
+        const version = new semver_1.SemVer(cudaVersionString);
+        // const cudnn_version = new SemVer(cudnnVersionString)
         const links = yield (0, get_links_1.getLinks)();
         let versions;
+        let cudnn_versions;
         switch (method) {
             case 'local':
                 versions = links.getAvailableLocalCudaVersions();
@@ -1229,14 +1473,40 @@ function getVersion(versionString, method) {
                         break;
                 }
         }
-        core.debug(`Available versions: ${versions}`);
+        core.debug(`Available CUDA versions: ${versions}`);
+        core.debug(`Available cudnn versions: ${cudnn_versions}`);
         if (versions.find(v => v.compare(version) === 0) !== undefined) {
-            core.debug(`Version available: ${version}`);
-            return version;
+            core.debug(`CUDA Version available: ${version}`);
+            const toolkit = {
+                cuda_version: version,
+                cudnn_version: cudnnDownloadURL.length > 0 && cudnnVersionString.length > 0
+                    ? new semver_1.SemVer(cudnnVersionString)
+                    : undefined,
+                cuda_url: undefined,
+                cudnn_url: cudnnDownloadURL.length > 0 && cudnnVersionString.length > 0
+                    ? new URL(cudnnDownloadURL)
+                    : undefined
+            };
+            return toolkit;
+            // if (
+            //   cudnn_versions.find(vv => vv.compare(cudnn_version) === 0) !== undefined
+            // ) {
+            //   core.debug(`cudnn version available: ${cudnn_version}`)
+            //   const toolkit: CUDAToolkit = {
+            //     cuda_version: version,
+            //     cudnn_version: cudnn_version,
+            //     cuda_url: new URL(''),
+            //     cudnn_url: new URL('')
+            //   }
+            //   return toolkit
+            // } else {
+            //   core.debug(`Version not available error!`)
+            //   throw new Error(`Cudnn version not available: ${version}`)
+            // }
         }
         else {
             core.debug(`Version not available error!`);
-            throw new Error(`Version not available: ${version}`);
+            throw new Error(`CUDA version not available: ${version}`);
         }
     });
 }
@@ -7520,13 +7790,9 @@ function exportVariable(name, val) {
     process.env[name] = convertedVal;
     const filePath = process.env['GITHUB_ENV'] || '';
     if (filePath) {
-        const delimiter = '_GitHubActionsFileCommandDelimeter_';
-        const commandValue = `${name}<<${delimiter}${os.EOL}${convertedVal}${os.EOL}${delimiter}`;
-        file_command_1.issueCommand('ENV', commandValue);
+        return file_command_1.issueFileCommand('ENV', file_command_1.prepareKeyValueMessage(name, val));
     }
-    else {
-        command_1.issueCommand('set-env', { name }, convertedVal);
-    }
+    command_1.issueCommand('set-env', { name }, convertedVal);
 }
 exports.exportVariable = exportVariable;
 /**
@@ -7544,7 +7810,7 @@ exports.setSecret = setSecret;
 function addPath(inputPath) {
     const filePath = process.env['GITHUB_PATH'] || '';
     if (filePath) {
-        file_command_1.issueCommand('PATH', inputPath);
+        file_command_1.issueFileCommand('PATH', inputPath);
     }
     else {
         command_1.issueCommand('add-path', {}, inputPath);
@@ -7584,7 +7850,10 @@ function getMultilineInput(name, options) {
     const inputs = getInput(name, options)
         .split('\n')
         .filter(x => x !== '');
-    return inputs;
+    if (options && options.trimWhitespace === false) {
+        return inputs;
+    }
+    return inputs.map(input => input.trim());
 }
 exports.getMultilineInput = getMultilineInput;
 /**
@@ -7617,8 +7886,12 @@ exports.getBooleanInput = getBooleanInput;
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function setOutput(name, value) {
+    const filePath = process.env['GITHUB_OUTPUT'] || '';
+    if (filePath) {
+        return file_command_1.issueFileCommand('OUTPUT', file_command_1.prepareKeyValueMessage(name, value));
+    }
     process.stdout.write(os.EOL);
-    command_1.issueCommand('set-output', { name }, value);
+    command_1.issueCommand('set-output', { name }, utils_1.toCommandValue(value));
 }
 exports.setOutput = setOutput;
 /**
@@ -7747,7 +8020,11 @@ exports.group = group;
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function saveState(name, value) {
-    command_1.issueCommand('save-state', { name }, value);
+    const filePath = process.env['GITHUB_STATE'] || '';
+    if (filePath) {
+        return file_command_1.issueFileCommand('STATE', file_command_1.prepareKeyValueMessage(name, value));
+    }
+    command_1.issueCommand('save-state', { name }, utils_1.toCommandValue(value));
 }
 exports.saveState = saveState;
 /**
@@ -7813,13 +8090,14 @@ var __importStar = (this && this.__importStar) || function (mod) {
     return result;
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.issueCommand = void 0;
+exports.prepareKeyValueMessage = exports.issueFileCommand = void 0;
 // We use any as a valid input type
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const fs = __importStar(__nccwpck_require__(7147));
 const os = __importStar(__nccwpck_require__(2037));
+const uuid_1 = __nccwpck_require__(8974);
 const utils_1 = __nccwpck_require__(5278);
-function issueCommand(command, message) {
+function issueFileCommand(command, message) {
     const filePath = process.env[`GITHUB_${command}`];
     if (!filePath) {
         throw new Error(`Unable to find environment variable for file command ${command}`);
@@ -7831,7 +8109,22 @@ function issueCommand(command, message) {
         encoding: 'utf8'
     });
 }
-exports.issueCommand = issueCommand;
+exports.issueFileCommand = issueFileCommand;
+function prepareKeyValueMessage(key, value) {
+    const delimiter = `ghadelimiter_${uuid_1.v4()}`;
+    const convertedValue = utils_1.toCommandValue(value);
+    // These should realistically never happen, but just in case someone finds a
+    // way to exploit uuid generation let's not allow keys or values that contain
+    // the delimiter.
+    if (key.includes(delimiter)) {
+        throw new Error(`Unexpected input: name should not contain the delimiter "${delimiter}"`);
+    }
+    if (convertedValue.includes(delimiter)) {
+        throw new Error(`Unexpected input: value should not contain the delimiter "${delimiter}"`);
+    }
+    return `${key}<<${delimiter}${os.EOL}${convertedValue}${os.EOL}${delimiter}`;
+}
+exports.prepareKeyValueMessage = prepareKeyValueMessage;
 //# sourceMappingURL=file-command.js.map
 
 /***/ }),
@@ -8319,6 +8612,652 @@ function toCommandProperties(annotationProperties) {
 }
 exports.toCommandProperties = toCommandProperties;
 //# sourceMappingURL=utils.js.map
+
+/***/ }),
+
+/***/ 8974:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+Object.defineProperty(exports, "v1", ({
+  enumerable: true,
+  get: function () {
+    return _v.default;
+  }
+}));
+Object.defineProperty(exports, "v3", ({
+  enumerable: true,
+  get: function () {
+    return _v2.default;
+  }
+}));
+Object.defineProperty(exports, "v4", ({
+  enumerable: true,
+  get: function () {
+    return _v3.default;
+  }
+}));
+Object.defineProperty(exports, "v5", ({
+  enumerable: true,
+  get: function () {
+    return _v4.default;
+  }
+}));
+Object.defineProperty(exports, "NIL", ({
+  enumerable: true,
+  get: function () {
+    return _nil.default;
+  }
+}));
+Object.defineProperty(exports, "version", ({
+  enumerable: true,
+  get: function () {
+    return _version.default;
+  }
+}));
+Object.defineProperty(exports, "validate", ({
+  enumerable: true,
+  get: function () {
+    return _validate.default;
+  }
+}));
+Object.defineProperty(exports, "stringify", ({
+  enumerable: true,
+  get: function () {
+    return _stringify.default;
+  }
+}));
+Object.defineProperty(exports, "parse", ({
+  enumerable: true,
+  get: function () {
+    return _parse.default;
+  }
+}));
+
+var _v = _interopRequireDefault(__nccwpck_require__(1595));
+
+var _v2 = _interopRequireDefault(__nccwpck_require__(6993));
+
+var _v3 = _interopRequireDefault(__nccwpck_require__(1472));
+
+var _v4 = _interopRequireDefault(__nccwpck_require__(6217));
+
+var _nil = _interopRequireDefault(__nccwpck_require__(2381));
+
+var _version = _interopRequireDefault(__nccwpck_require__(427));
+
+var _validate = _interopRequireDefault(__nccwpck_require__(2609));
+
+var _stringify = _interopRequireDefault(__nccwpck_require__(1458));
+
+var _parse = _interopRequireDefault(__nccwpck_require__(6385));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+/***/ }),
+
+/***/ 5842:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+
+var _crypto = _interopRequireDefault(__nccwpck_require__(6113));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function md5(bytes) {
+  if (Array.isArray(bytes)) {
+    bytes = Buffer.from(bytes);
+  } else if (typeof bytes === 'string') {
+    bytes = Buffer.from(bytes, 'utf8');
+  }
+
+  return _crypto.default.createHash('md5').update(bytes).digest();
+}
+
+var _default = md5;
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 2381:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+var _default = '00000000-0000-0000-0000-000000000000';
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 6385:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+
+var _validate = _interopRequireDefault(__nccwpck_require__(2609));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function parse(uuid) {
+  if (!(0, _validate.default)(uuid)) {
+    throw TypeError('Invalid UUID');
+  }
+
+  let v;
+  const arr = new Uint8Array(16); // Parse ########-....-....-....-............
+
+  arr[0] = (v = parseInt(uuid.slice(0, 8), 16)) >>> 24;
+  arr[1] = v >>> 16 & 0xff;
+  arr[2] = v >>> 8 & 0xff;
+  arr[3] = v & 0xff; // Parse ........-####-....-....-............
+
+  arr[4] = (v = parseInt(uuid.slice(9, 13), 16)) >>> 8;
+  arr[5] = v & 0xff; // Parse ........-....-####-....-............
+
+  arr[6] = (v = parseInt(uuid.slice(14, 18), 16)) >>> 8;
+  arr[7] = v & 0xff; // Parse ........-....-....-####-............
+
+  arr[8] = (v = parseInt(uuid.slice(19, 23), 16)) >>> 8;
+  arr[9] = v & 0xff; // Parse ........-....-....-....-############
+  // (Use "/" to avoid 32-bit truncation when bit-shifting high-order bytes)
+
+  arr[10] = (v = parseInt(uuid.slice(24, 36), 16)) / 0x10000000000 & 0xff;
+  arr[11] = v / 0x100000000 & 0xff;
+  arr[12] = v >>> 24 & 0xff;
+  arr[13] = v >>> 16 & 0xff;
+  arr[14] = v >>> 8 & 0xff;
+  arr[15] = v & 0xff;
+  return arr;
+}
+
+var _default = parse;
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 6230:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+var _default = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000)$/i;
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 9784:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = rng;
+
+var _crypto = _interopRequireDefault(__nccwpck_require__(6113));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+const rnds8Pool = new Uint8Array(256); // # of random values to pre-allocate
+
+let poolPtr = rnds8Pool.length;
+
+function rng() {
+  if (poolPtr > rnds8Pool.length - 16) {
+    _crypto.default.randomFillSync(rnds8Pool);
+
+    poolPtr = 0;
+  }
+
+  return rnds8Pool.slice(poolPtr, poolPtr += 16);
+}
+
+/***/ }),
+
+/***/ 8844:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+
+var _crypto = _interopRequireDefault(__nccwpck_require__(6113));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function sha1(bytes) {
+  if (Array.isArray(bytes)) {
+    bytes = Buffer.from(bytes);
+  } else if (typeof bytes === 'string') {
+    bytes = Buffer.from(bytes, 'utf8');
+  }
+
+  return _crypto.default.createHash('sha1').update(bytes).digest();
+}
+
+var _default = sha1;
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 1458:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+
+var _validate = _interopRequireDefault(__nccwpck_require__(2609));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+/**
+ * Convert array of 16 byte values to UUID string format of the form:
+ * XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+ */
+const byteToHex = [];
+
+for (let i = 0; i < 256; ++i) {
+  byteToHex.push((i + 0x100).toString(16).substr(1));
+}
+
+function stringify(arr, offset = 0) {
+  // Note: Be careful editing this code!  It's been tuned for performance
+  // and works in ways you may not expect. See https://github.com/uuidjs/uuid/pull/434
+  const uuid = (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + '-' + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + '-' + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + '-' + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + '-' + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase(); // Consistency check for valid UUID.  If this throws, it's likely due to one
+  // of the following:
+  // - One or more input array values don't map to a hex octet (leading to
+  // "undefined" in the uuid)
+  // - Invalid input values for the RFC `version` or `variant` fields
+
+  if (!(0, _validate.default)(uuid)) {
+    throw TypeError('Stringified UUID is invalid');
+  }
+
+  return uuid;
+}
+
+var _default = stringify;
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 1595:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+
+var _rng = _interopRequireDefault(__nccwpck_require__(9784));
+
+var _stringify = _interopRequireDefault(__nccwpck_require__(1458));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+// **`v1()` - Generate time-based UUID**
+//
+// Inspired by https://github.com/LiosK/UUID.js
+// and http://docs.python.org/library/uuid.html
+let _nodeId;
+
+let _clockseq; // Previous uuid creation time
+
+
+let _lastMSecs = 0;
+let _lastNSecs = 0; // See https://github.com/uuidjs/uuid for API details
+
+function v1(options, buf, offset) {
+  let i = buf && offset || 0;
+  const b = buf || new Array(16);
+  options = options || {};
+  let node = options.node || _nodeId;
+  let clockseq = options.clockseq !== undefined ? options.clockseq : _clockseq; // node and clockseq need to be initialized to random values if they're not
+  // specified.  We do this lazily to minimize issues related to insufficient
+  // system entropy.  See #189
+
+  if (node == null || clockseq == null) {
+    const seedBytes = options.random || (options.rng || _rng.default)();
+
+    if (node == null) {
+      // Per 4.5, create and 48-bit node id, (47 random bits + multicast bit = 1)
+      node = _nodeId = [seedBytes[0] | 0x01, seedBytes[1], seedBytes[2], seedBytes[3], seedBytes[4], seedBytes[5]];
+    }
+
+    if (clockseq == null) {
+      // Per 4.2.2, randomize (14 bit) clockseq
+      clockseq = _clockseq = (seedBytes[6] << 8 | seedBytes[7]) & 0x3fff;
+    }
+  } // UUID timestamps are 100 nano-second units since the Gregorian epoch,
+  // (1582-10-15 00:00).  JSNumbers aren't precise enough for this, so
+  // time is handled internally as 'msecs' (integer milliseconds) and 'nsecs'
+  // (100-nanoseconds offset from msecs) since unix epoch, 1970-01-01 00:00.
+
+
+  let msecs = options.msecs !== undefined ? options.msecs : Date.now(); // Per 4.2.1.2, use count of uuid's generated during the current clock
+  // cycle to simulate higher resolution clock
+
+  let nsecs = options.nsecs !== undefined ? options.nsecs : _lastNSecs + 1; // Time since last uuid creation (in msecs)
+
+  const dt = msecs - _lastMSecs + (nsecs - _lastNSecs) / 10000; // Per 4.2.1.2, Bump clockseq on clock regression
+
+  if (dt < 0 && options.clockseq === undefined) {
+    clockseq = clockseq + 1 & 0x3fff;
+  } // Reset nsecs if clock regresses (new clockseq) or we've moved onto a new
+  // time interval
+
+
+  if ((dt < 0 || msecs > _lastMSecs) && options.nsecs === undefined) {
+    nsecs = 0;
+  } // Per 4.2.1.2 Throw error if too many uuids are requested
+
+
+  if (nsecs >= 10000) {
+    throw new Error("uuid.v1(): Can't create more than 10M uuids/sec");
+  }
+
+  _lastMSecs = msecs;
+  _lastNSecs = nsecs;
+  _clockseq = clockseq; // Per 4.1.4 - Convert from unix epoch to Gregorian epoch
+
+  msecs += 12219292800000; // `time_low`
+
+  const tl = ((msecs & 0xfffffff) * 10000 + nsecs) % 0x100000000;
+  b[i++] = tl >>> 24 & 0xff;
+  b[i++] = tl >>> 16 & 0xff;
+  b[i++] = tl >>> 8 & 0xff;
+  b[i++] = tl & 0xff; // `time_mid`
+
+  const tmh = msecs / 0x100000000 * 10000 & 0xfffffff;
+  b[i++] = tmh >>> 8 & 0xff;
+  b[i++] = tmh & 0xff; // `time_high_and_version`
+
+  b[i++] = tmh >>> 24 & 0xf | 0x10; // include version
+
+  b[i++] = tmh >>> 16 & 0xff; // `clock_seq_hi_and_reserved` (Per 4.2.2 - include variant)
+
+  b[i++] = clockseq >>> 8 | 0x80; // `clock_seq_low`
+
+  b[i++] = clockseq & 0xff; // `node`
+
+  for (let n = 0; n < 6; ++n) {
+    b[i + n] = node[n];
+  }
+
+  return buf || (0, _stringify.default)(b);
+}
+
+var _default = v1;
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 6993:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+
+var _v = _interopRequireDefault(__nccwpck_require__(5920));
+
+var _md = _interopRequireDefault(__nccwpck_require__(5842));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+const v3 = (0, _v.default)('v3', 0x30, _md.default);
+var _default = v3;
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 5920:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = _default;
+exports.URL = exports.DNS = void 0;
+
+var _stringify = _interopRequireDefault(__nccwpck_require__(1458));
+
+var _parse = _interopRequireDefault(__nccwpck_require__(6385));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function stringToBytes(str) {
+  str = unescape(encodeURIComponent(str)); // UTF8 escape
+
+  const bytes = [];
+
+  for (let i = 0; i < str.length; ++i) {
+    bytes.push(str.charCodeAt(i));
+  }
+
+  return bytes;
+}
+
+const DNS = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+exports.DNS = DNS;
+const URL = '6ba7b811-9dad-11d1-80b4-00c04fd430c8';
+exports.URL = URL;
+
+function _default(name, version, hashfunc) {
+  function generateUUID(value, namespace, buf, offset) {
+    if (typeof value === 'string') {
+      value = stringToBytes(value);
+    }
+
+    if (typeof namespace === 'string') {
+      namespace = (0, _parse.default)(namespace);
+    }
+
+    if (namespace.length !== 16) {
+      throw TypeError('Namespace must be array-like (16 iterable integer values, 0-255)');
+    } // Compute hash of namespace and value, Per 4.3
+    // Future: Use spread syntax when supported on all platforms, e.g. `bytes =
+    // hashfunc([...namespace, ... value])`
+
+
+    let bytes = new Uint8Array(16 + value.length);
+    bytes.set(namespace);
+    bytes.set(value, namespace.length);
+    bytes = hashfunc(bytes);
+    bytes[6] = bytes[6] & 0x0f | version;
+    bytes[8] = bytes[8] & 0x3f | 0x80;
+
+    if (buf) {
+      offset = offset || 0;
+
+      for (let i = 0; i < 16; ++i) {
+        buf[offset + i] = bytes[i];
+      }
+
+      return buf;
+    }
+
+    return (0, _stringify.default)(bytes);
+  } // Function#name is not settable on some platforms (#270)
+
+
+  try {
+    generateUUID.name = name; // eslint-disable-next-line no-empty
+  } catch (err) {} // For CommonJS default export support
+
+
+  generateUUID.DNS = DNS;
+  generateUUID.URL = URL;
+  return generateUUID;
+}
+
+/***/ }),
+
+/***/ 1472:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+
+var _rng = _interopRequireDefault(__nccwpck_require__(9784));
+
+var _stringify = _interopRequireDefault(__nccwpck_require__(1458));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function v4(options, buf, offset) {
+  options = options || {};
+
+  const rnds = options.random || (options.rng || _rng.default)(); // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
+
+
+  rnds[6] = rnds[6] & 0x0f | 0x40;
+  rnds[8] = rnds[8] & 0x3f | 0x80; // Copy bytes to buffer, if provided
+
+  if (buf) {
+    offset = offset || 0;
+
+    for (let i = 0; i < 16; ++i) {
+      buf[offset + i] = rnds[i];
+    }
+
+    return buf;
+  }
+
+  return (0, _stringify.default)(rnds);
+}
+
+var _default = v4;
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 6217:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+
+var _v = _interopRequireDefault(__nccwpck_require__(5920));
+
+var _sha = _interopRequireDefault(__nccwpck_require__(8844));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+const v5 = (0, _v.default)('v5', 0x50, _sha.default);
+var _default = v5;
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 2609:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+
+var _regex = _interopRequireDefault(__nccwpck_require__(6230));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function validate(uuid) {
+  return typeof uuid === 'string' && _regex.default.test(uuid);
+}
+
+var _default = validate;
+exports["default"] = _default;
+
+/***/ }),
+
+/***/ 427:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+
+Object.defineProperty(exports, "__esModule", ({
+  value: true
+}));
+exports["default"] = void 0;
+
+var _validate = _interopRequireDefault(__nccwpck_require__(2609));
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function version(uuid) {
+  if (!(0, _validate.default)(uuid)) {
+    throw TypeError('Invalid UUID');
+  }
+
+  return parseInt(uuid.substr(14, 1), 16);
+}
+
+var _default = version;
+exports["default"] = _default;
 
 /***/ }),
 
@@ -62498,7 +63437,7 @@ module.exports = Comparator
 const parseOptions = __nccwpck_require__(785)
 const { re, t } = __nccwpck_require__(9523)
 const cmp = __nccwpck_require__(5098)
-const debug = __nccwpck_require__(427)
+const debug = __nccwpck_require__(106)
 const SemVer = __nccwpck_require__(8088)
 const Range = __nccwpck_require__(9828)
 
@@ -62707,7 +63646,7 @@ const cache = new LRU({ max: 1000 })
 
 const parseOptions = __nccwpck_require__(785)
 const Comparator = __nccwpck_require__(1532)
-const debug = __nccwpck_require__(427)
+const debug = __nccwpck_require__(106)
 const SemVer = __nccwpck_require__(8088)
 const {
   re,
@@ -63034,7 +63973,7 @@ const testSet = (set, version, options) => {
 /***/ 8088:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const debug = __nccwpck_require__(427)
+const debug = __nccwpck_require__(106)
 const { MAX_LENGTH, MAX_SAFE_INTEGER } = __nccwpck_require__(2293)
 const { re, t } = __nccwpck_require__(9523)
 
@@ -63829,7 +64768,7 @@ module.exports = {
 
 /***/ }),
 
-/***/ 427:
+/***/ 106:
 /***/ ((module) => {
 
 const debug = (
@@ -63897,7 +64836,7 @@ module.exports = parseOptions
 /***/ ((module, exports, __nccwpck_require__) => {
 
 const { MAX_SAFE_COMPONENT_LENGTH } = __nccwpck_require__(2293)
-const debug = __nccwpck_require__(427)
+const debug = __nccwpck_require__(106)
 exports = module.exports = {}
 
 // The actual regexps go on exports.re
